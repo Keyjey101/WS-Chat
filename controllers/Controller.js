@@ -1,6 +1,7 @@
 require('dotenv').config()
 const bcrypt = require('bcrypt')
 const jwt = require('jsonwebtoken')
+const ApiError = require('../handlers/Error')
 const {User, Message} = require('../models/models')
 
 
