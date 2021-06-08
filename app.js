@@ -4,10 +4,12 @@ const express = require("express");
 const app = express();
 const server = require("http").createServer(app);
 const WebSocket = require("ws");
-const sequelize = require("./db");
+
 const router = require("./router/Router");
 const jwt = require("jsonwebtoken");
-const { Message, User } = require("./models/models");
+
+const client = require('./db')
+
 
 const PORT = process.env.PORT || 5000;
 
@@ -21,14 +23,18 @@ app.use("/api", router);
 
 const start = async () => {
   try {
+    await client.connect();
+
+    /*
     await sequelize.authenticate();
     await sequelize.sync();
+    */
     //инициализация вс-сервера
     const wss = new WebSocket.Server({ server: server });
 
     //массив для авторизованных подключений
     AUTHCLIENTS = [];
-    
+
     //массив где хранятся decoded токены, для проверки авторизован ли пользователь.
     //Наверно стоило делать это через промежуточные гет запросы к api/auth или хранить токен
     //в каком-нибудь методе для сообщения, но с двумя полями (юзер+мессадж) не понимаю как это сделать
@@ -58,7 +64,6 @@ const start = async () => {
               process.env.JWT,
               function (err, decoded) {
                 if (decoded.username === data.username) {
-
                   //с помощью колбека пушим данные о подключении и юзере в хранилища
                   AUTHCLIENTS.push(ws);
                   USERS.push(decoded.username);
@@ -77,6 +82,32 @@ const start = async () => {
             );
           }
 
+          //Здесь история без всяких айдишников и такого, просто по порядку, но тогда без Promise.all, но кода меньше и проще читается
+
+          if (
+            data !== null &&
+            data.message.split(" ")[0] === "simple" &&
+            AUTHCLIENTS.includes(ws)
+          ) {
+            const count2 = Number.parseInt(data.message.split(" ")[1]);
+
+            const mess = await client.query(
+              'SELECT * FROM "messages" JOIN "users" ON messages."userId" = users.id order by messages."createdAt" desc limit $1',
+              [count2]
+            );
+
+            mess.rows.forEach((element) => {
+              let hist = {};
+              hist["username"] = element.username;
+              hist["message"] = element.message;
+
+              const text = JSON.stringify(hist);
+              ws.send(text);
+            });
+
+            data = null;
+          }
+
           //проверка на запрос об истории сообщений и авторизованности пользователя
           if (
             data !== null &&
@@ -87,7 +118,10 @@ const start = async () => {
             const count = Number.parseInt(data.message.split(" ")[1]);
 
             //смотрим сколько всего сообщений в БД
-            const lenght = await Message.count(); //await же тоже промис (возвращенный) по сути
+            const lenghtSql = await client.query(
+              "SELECT COUNT (*) from messages"
+            );
+            const lenght = lenghtSql.rows[0].count;
 
             //проверка не превышает ли запрашиваемое кол-во сообщений общее число сообщений в БД
             const countedMessages = count > lenght ? lenght : count;
@@ -98,52 +132,38 @@ const start = async () => {
             //массив состоящий из единичных запросов к БД -поиск сообщений
             const ar = [];
 
-            //пуш в массив
-            for (let i = 0; i < countedMessages; i++) {
-              ar.push(Message.findOne({ where: { id: lenght - i } }));
-            }
+            //счетчик
+            let i = lenght - countedMessages + 1;
 
-            //Вау вот это владение промисами
+            //пуш в массив
+            while (i <= lenght) {
+              console.log("pushig id of message - ", i);
+              ar.push(
+                client.query(
+                  'SELECT * FROM "messages" JOIN "users" ON messages."userId" = users.id AND messages.id=$1',
+                  [i]
+                )
+              );
+
+              i++;
+            }
+            
+            //Промис ол! Вау!
             Promise.all(ar).then((result) => {
 
-              //массив состоящий из текста сообщений
-              const mes = result.map((element) => {
-                return element.dataValues.message;
+              //создаем массив в котором объекты из строк, возвращенных промисом
+              const res1 = result.map((x) => {
+                return x.rows[0];
               });
 
-              //массив состоящий из юзер-айдишников сообщений
-              const ids = result.map((element) => {
-                return element.dataValues.userId;
-              });
+              //для каждого элемента массива создаем объект - приводим к сроке и отправляем юзеру
+              res1.forEach((element) => {
+                let hist = {};
+                hist["username"] = element.username;
+                hist["message"] = element.message;
 
-              //массив состоящий из единичных запросов к БД -поиск юзеров
-              const nam = [];
-
-              //пуш в массив, использовал другую букву, чтобы просто читалось по другому, знаю про область видимости
-              for (let j = 0; j < ids.length; j++) {
-                nam.push(User.findOne({ where: { id: ids[j] } }));
-              }
-
-              //опять потрясающее владение промисами
-              Promise.all(nam).then((result) => {
-                const names = result.map((element) => {
-                  return element.dataValues.username;
-                });
-
-                //отправка сообщений, объекты хранятся в obj
-                for (let k = 0; k < ids.length; k++) {
-                  const plainText =
-                    '{"username":' +
-                    ' "' +
-                    names[k] +
-                    '", "' +
-                    'message": "' +
-                    mes[k] +
-                    '"}';
-                  const obj = JSON.parse(plainText);
-
-                  ws.send(plainText);
-                }
+                const text = JSON.stringify(hist);
+                ws.send(text);
               });
             });
 
@@ -158,19 +178,29 @@ const start = async () => {
             data !== null &&
             USERS.includes(data.username)
           ) {
+            
             const username = data.username;
 
             //поиск нужного юзера, который отправил сообщение
-            const user = await User.findOne({ where: { username } });
-            const userId = user.id;
+            const user = await client.query(
+              'SELECT * FROM "users" WHERE username=$1',
+              [username]
+            );
+            
+
+            const userId = user.rows[0].id;
             const message = data.message;
 
-            //создание сообщения в БД
-            const userMessage = await Message.create({
-              userId,
-              message,
-            });
+            //добавил, потому что не отключил таймстомпы при создании модели
+            const timestamp = new Date();
 
+            //создание сообщения в БД
+            const userMessage = await client.query(
+              `INSERT INTO messages (message, "userId", "createdAt", "updatedAt") VALUES ($1, $2, $3, $3)`,
+              [message, userId, timestamp]
+            );
+
+            
             //отправка этого сообщения всем активным пользователям
             wss.clients.forEach(function each(client) {
               if (client !== ws && client.readyState === WebSocket.OPEN) {
@@ -178,10 +208,8 @@ const start = async () => {
               }
             });
 
-
             //Если пользователь отправил корректное сообщение, но не авторизировался
           } else if (data !== null) {
-            
             ws.send(
               "Ваши сообщения не видны другим участникам чата, пожалуйста зарегестрируйтесь"
             );
@@ -189,7 +217,7 @@ const start = async () => {
 
           //Скорее всего пользователь отправил некорректное сообщение, о чем ему и сообщим
         } catch (e) {
-          console.log(e)
+          console.log(e);
           ws.send(
             'please send something like that {"username": "hello", "password": "world"}, check this page https://github.com/Keyjey101/WS-Chat'
           );
