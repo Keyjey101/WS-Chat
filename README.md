@@ -47,7 +47,7 @@ node app.js
 После чего его сообщения (за исключением служебных сообщений) становятся видны остальным подключенным клиентам (даже не авторизованным) и записываются в базу данных.
 ### История сообщений ###
 Юзер посылает сообщение вида
->{"username": "hello", "message": "history NUM"}
+>{"username": "hello", "message": "history NUM"} or {"username": "hello", "message": "simple NUM"}
 
 where 'NUM' is number of messages to be recalled from history 
 
